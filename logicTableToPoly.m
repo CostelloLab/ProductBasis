@@ -32,8 +32,9 @@ for loopRedParam = 0:(numVars-1)
 end
 
 polyCoefficients = polyBasis\outcomes;
-nonzeroEntries = polyCoefficients ~= 0;
-thePoly = { polyCoefficients(nonzeroEntries, :), polyPowers(nonzeroEntries, :) == 1 };
+polyErrors = (abs(outcomes-polyBasis*polyCoefficients)+eps(outcomes))*cond(polyBasis);
+nonzeroEntries = abs(polyCoefficients) > polyErrors;
+thePoly = { polyCoefficients(nonzeroEntries, :), polyErrors(nonzeroEntries, :), polyPowers(nonzeroEntries, :) == 1 };
 
 
 end

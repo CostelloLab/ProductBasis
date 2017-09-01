@@ -1,22 +1,22 @@
 %Input true to run simulation with mutations or false to not
-doingMutations = false; %true;
+doingMutations = false;
 %Input the percent of wild type (non mutated) ex 0.99 for a 1% mutation
-wildTypeRate = 0.99;
+wildTypeRate = 0.9999;
 %input true to run simulation with Monte Carlo or false to not
-compareMonteCarlo = false; %true;
+compareMonteCarlo = false;
 % input the amount of runs to generate Monte Carlo
 numMonteCarloRuns = 10^4;
 % input the number of time steps to simulate
 timeSteps= 50;
 % input the number of the variable to follow
-toLookAt = {[4] [9] [4 9]}; %{ [ 4 9 ] };
+toLookAt = { [37 38] }; %{[37], [38], [37 38]}; %{[37 38 8+40 ]};
 
 % list all variables being simulated
 allVars = {'CD45', 'CD4', 'TCRLIG', 'TCRBIND', 'PAGCSK', 'LCK', 'FYN', 'CCBL', 'TCRPHOS', 'RLK', 'ZAP70', ...
     'LATPHOSP', 'GADS', 'ITK', 'IP3', 'CA', 'CALCIN', 'SLP76', 'PLCGB', 'PLCGACT', 'DAG', 'GRB2SOS', 'RASGRP1', ...
     'PKCTH', 'RAS', 'RAF', 'SEK', 'MEK', 'JNK', 'IKKB', 'RSK', 'ERK', 'FOS', 'JUN', 'IKB', 'CREB', 'CRE', 'AP1', ...
     'NFKB', 'NFAT'}; 
-% list boolen rules for each variable to turn on, in order with allVars
+% list Boolean rules for each variable to turn on, in order with allVars
 transitionRules = { ...
   'CD45', 'CD4', 'TCRLIG', 'TCRLIG AND (NOT CCBL)', 'FYN OR (NOT TCRBIND)', 'CD45 AND CD4 AND (NOT PAGCSK)', ...
   '(TCRBIND AND CD45) OR (LCK AND CD45)', 'ZAP70', '(LCK AND TCRBIND) OR FYN', 'FYN', ...
@@ -36,9 +36,9 @@ end
 
 
 if doingMutations
-    bHistory=simTransitionMatrix(logicTables,[rand(1,0.5*length(allVars)) < .5, rand(1,0.5*length(allVars)) < wildTypeRate]==1,zeros(1,length(allVars)),30);
+    bHistory = simBoolModel(logicTables,[rand(1,0.5*length(allVars)) < .5, rand(1,0.5*length(allVars)) < wildTypeRate]==1,zeros(1,length(allVars)), timeSteps);
 else
-    bHistory=simTransitionMatrix(logicTables, rand(1, length(allVars)) < .5, zeros(1,length(allVars)),30);
+    bHistory = simBoolModel(logicTables, rand(1, length(allVars)) < .5, zeros(1,length(allVars)), timeSteps);
 end
 plotBoolEvolution();
 
@@ -49,17 +49,22 @@ end
 M = polynomialModel(logicTables, toLookAtLogical);
 
 if compareMonteCarlo
+    tic;
     allSims= zeros(numMonteCarloRuns, (1+timeSteps));
     montC=zeros(length(toLookAt), (timeSteps +1));
     err = zeros(length(toLookAt), (timeSteps +1));
     for montloop = 1:length(toLookAt)
         for i=1:numMonteCarloRuns;
-            [ ~, tmp ] = simTransitionMatrix(logicTables,[round(rand(1,0.5*length(allVars))), ones(1,0.5*length(allVars))]==1,toLookAtLogical(montloop,:),timeSteps);
+            WTvars = rand(1, length(allVars)/2) < wildTypeRate;
+            [ ~, tmp ] = simBoolModel(logicTables, [ (rand(1, length(allVars)/2) < .5) & WTvars, WTvars ], toLookAtLogical(montloop,:), timeSteps);
             allSims(i, :) = tmp;
         end
         montC(montloop,:)= mean(allSims,1);
-     end  
-    err = (sqrt((montC-(montC.^2))/(numMonteCarloRuns-1)));
+    end
+    montCbounded = max(min(montC, 1-.5/numMonteCarloRuns), .5/numMonteCarloRuns);
+    err = sqrt(montCbounded .* (1-montCbounded) / numMonteCarloRuns);
+%    err = (sqrt((montC-(montC.^2))/(numMonteCarloRuns-1)));
+    toc
 end
 
 tic;
@@ -79,10 +84,10 @@ figure, hold on
 legendStrings = {};
 for loopVar = 1:length(toLookAt)    
     if doingMutations
-        plot(0:timeSteps, evolveTransitionMatrix(M, 0.5.^(sum(M.xs(:, 1:0.5*length(allVars)),2)) .* 1.00.^(sum(M.xs(:, 41:end),2)), toLookAtLogical(loopVar, :), timeSteps))
-        plot(0:timeSteps, evolveTransitionMatrix(M, 0.5.^(sum(M.xs(:, 1:0.5*length(allVars)),2)) .* wildTypeRate.^(sum(M.xs(:, 41:end),2)), toLookAtLogical(loopVar, :), timeSteps))
+        plot(0:timeSteps, evolveF(M, 0.5.^(sum(M.xs(:, 1:0.5*length(allVars)),2)) .* 1.00.^(sum(M.xs(:, 41:end),2)), toLookAtLogical(loopVar, :), timeSteps))
+        plot(0:timeSteps, evolveF(M, 0.5.^(sum(M.xs(:, 1:0.5*length(allVars)),2)) .* wildTypeRate.^(sum(M.xs(:, 41:end),2)), toLookAtLogical(loopVar, :), timeSteps))
     else    
-        plot(0:timeSteps, evolveTransitionMatrix(M, 0.5.^(sum(M.xs,2)), toLookAtLogical(loopVar, :), timeSteps))
+        plot(0:timeSteps, evolveF(M, 0.5.^(sum(M.xs,2)), toLookAtLogical(loopVar, :), timeSteps))
     end
     if compareMonteCarlo
         errorbar(0:timeSteps, montC(loopVar, :), err(loopVar, :), 'o')
@@ -95,7 +100,7 @@ for loopVar = 1:length(toLookAt)
         legendStrings{end+1} = [ legendStrings{end} ' mutated' ];
     end
     if compareMonteCarlo
-        legendStrings{end+1} = [ legendStrings{end} ' Monte Carlo' ];
+        legendStrings{end+1} = [ legendStrings{end} ', Monte Carlo' ];
     end
 end
 
@@ -109,3 +114,9 @@ ylabel('population fraction')
 xlim([0 timeSteps])
 legend(legendStrings)
 set(gcf, 'Position', [0, 3000, 350, 200])
+
+% for Fig 1D -- TCx, TCx2 are the evolution of CRE and AP1 w/, w/o cCbl
+% figure, hold on
+% plot(0:timeSteps, log10(TCx)), plot(0:timeSteps, log10(TCx-TCx2), '.')
+% legend('CRE AND AP1', 'CRE AND AP1 AND NOT cCbl')
+% set(gcf, 'Position', [0, 3000, 350, 200])

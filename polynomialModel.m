@@ -11,17 +11,18 @@ end
 
 M.xs = varsOfInterest;
 M.fs = zeros(0, size(varsOfInterest, 1));
+M.ferr = M.fs;
 M.ts = ones(0, 1);
 
 M.baseFs = cell(1, bMax);
 for loopB = 1:bMax
     tempPoly = logicTableToPoly(logicTables{loopB}{2});
-    fullCoefs = false(size(tempPoly{2}, 1), bMax);
+    fullCoefs = false(size(tempPoly{3}, 1), bMax);
     for loopX = 1:length(logicTables{loopB}{1})             % manually loop to avoid problems when two tempPoly{1} variables map to the same
         fullCoefs(:, logicTables{loopB}{1}(loopX)) = ...    % fullCoefs variable, as can happen with periodic boundary conditions (e.g. fly network)
-            fullCoefs(:, logicTables{loopB}{1}(loopX)) | tempPoly{2}(:, loopX);
+            fullCoefs(:, logicTables{loopB}{1}(loopX)) | tempPoly{3}(:, loopX);
     end
-    M.baseFs{loopB} = reducePoly({ tempPoly{1}, fullCoefs });
+    M.baseFs{loopB} = reducePoly({ tempPoly{1}, tempPoly{2}, fullCoefs });
 end
 
 M.cxs = false(0, bMax);

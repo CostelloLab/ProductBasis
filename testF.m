@@ -51,7 +51,7 @@ end
 %% run a number of tests on a 4th-order logic system, involving many
 % variables up through x_{1234}
 
-% #1: test our simTransitionMatrix() routine correctly simulates a single
+% #1: test our simBoolModel() routine correctly simulates a single
 % network
 
 logicTables = { ...
@@ -64,7 +64,8 @@ M = polynomialModel(logicTables);
 
 x0 = M.xs;
 fs0 = M.fs;
-[ bs, xs ] = simTransitionMatrix(logicTables, [0 1 1 0], [0 1 0 1], 10);
+ferr0 = M.ferr;
+[ bs, xs ] = simBoolModel(logicTables, [0 1 1 0], [0 1 0 1], 10);
 
 if sum(sum(bs ~= [ 0 1 1 0; 0 0 0 1; 1 1 0 0; 1 1 1 1; 0 0 1 1; 0 1 0 1;
                   1 1 0 1; 1 0 1 1; 0 0 0 1; 1 1 0 0; 1 1 1 1 ])) == 0 ...
@@ -111,17 +112,17 @@ else
 end
 
 
-%% #3: test that evolveTransitionMatrix() using the output of
+%% #3: test that evolveF() using the output of
 % buildF() correctly predicts the evolution of (in this
 % case) one network
 
-if sum(round(evolveTransitionMatrix(M, [ 0 1 0 1 1 0 0 0 0 0 0 0 0 1 0 0 ]', M.xs(4, :), 10)) ...
+if sum(round(evolveF(M, [ 0 1 0 1 1 0 0 0 0 0 0 0 0 1 0 0 ]', M.xs(4, :), 10)) ...
                     ~= [ 1 1 1 1 0 1 1 1 1 1 1 ]) == 0 && ...
-        sum(round(evolveTransitionMatrix(M, [ 0 1 0 1 1 0 0 0 0 0 0 0 0 1 0 0 ]', M.xs(1, :), 10)) ...
+        sum(round(evolveF(M, [ 0 1 0 1 1 0 0 0 0 0 0 0 0 1 0 0 ]', M.xs(1, :), 10)) ...
                     ~= [ 0 1 1 0 1 1 0 0 1 1 0 ]) == 0 && ...
-        sum(round(evolveTransitionMatrix(M, [ 0 1 0 1 1 0 0 0 0 0 0 0 0 1 0 0 ]', M.xs(6, :), 10)) ...
+        sum(round(evolveF(M, [ 0 1 0 1 1 0 0 0 0 0 0 0 0 1 0 0 ]', M.xs(6, :), 10)) ...
                     ~= [ 0 1 1 0 0 1 0 0 1 1 0 ]) == 0 && ...
-        sum(round(evolveTransitionMatrix(M, [ 0 1 0 1 1 0 0 0 0 0 0 0 0 1 0 0 ]', M.xs(15, :), 10)) ...
+        sum(round(evolveF(M, [ 0 1 0 1 1 0 0 0 0 0 0 0 0 1 0 0 ]', M.xs(15, :), 10)) ...
                     ~= [ 0 0 0 0 0 1 0 0 0 0 0 ]) == 0
     disp('passed 4th-order logic gate evolution')
 else
@@ -140,10 +141,11 @@ end
 
 M.xs = x0;
 M.fs = fs0;
+M.ferr = ferr0;
 M.cxs = false(0, size(x0, 2));
 M.cs = {};
 M.ts = zeros(0, 1);
-[ M, tStart ] = buildF(M, 20, 0, .1 );
+[ M, tStart ] = buildF(M, 20, 0, false, .1 );
 
 fM_idxs_1 = zeros(1, size(M.xs, 1));
 for loopX = 1:size(M.xs, 1)
@@ -186,12 +188,12 @@ logicTables = { ...
 
 M = polynomialModel(logicTables);
 
-[ M, tStart ] = buildF(M, 10, 0, .1);
+[ M, tStart ] = buildF(M, 10, 0, false, .1);
 
 if sum(sum(M.xs ~= ([ 0 1 1 ] == 1))) == 0 ...
         && sum(sum(abs(M.fs - [ 1 ] > 1.e-12))) == 0 ...
-        && M.ts == 5 ...
-        && tStart == 5
+        && M.ts == 4 ...
+        && tStart == 4
     disp('passed OR-NOT test')
 else
     error('*** ERROR!!! on OR-NOT test ***')
@@ -201,24 +203,24 @@ end
 
 %% TEST:  find attractors of a 4-node probabilistic Repressilator-type network
 
-logicTables = { ...
-    { [4 1], [ 0 .9 .1 1 ] }, ...
-    { [1 2], [ 0 .8 .2 1 ] }, ...
-    { [2 3], [ 0 .7 .3 1 ] }, ...
-    { [3 4], [ 0 .6 .4 1 ] }   };
-
-M = polynomialModel(logicTables);
-
-[ M, tStart ] = buildF(M, 16, 0, .6);
-
-if sum(sum(M.xs ~= ([ 1 1 1 1 ] == 1))) == 0 ...
-        && sum(sum(abs(M.fs - [ 1 ] > 1.e-10))) == 0 ...
-        && M.ts == 4 ...
-        && tStart == 4
-    disp('passed 4-node PBN test')
-else
-    error('*** ERROR!!! on 4-node PBN test ***')
-end
+% logicTables = { ...
+%     { [4 1], [ 0 .9 .1 1 ] }, ...
+%     { [1 2], [ 0 .8 .2 1 ] }, ...
+%     { [2 3], [ 0 .7 .3 1 ] }, ...
+%     { [3 4], [ 0 .6 .4 1 ] }   };
+% 
+% M = polynomialModel(logicTables);
+% 
+% [ M, tStart ] = buildF(M, 16, 0, false, .6);
+% 
+% if sum(sum(M.xs ~= ([ 1 0 0 0 ] == 1))) == 0 ...
+%         && sum(sum(abs(M.fs - [ 1 ]) > M.ferr)) == 0 ...
+%         && M.ts == 10 ...
+%         && tStart == 10
+%     disp('passed 4-node PBN test')
+% else
+%     error('*** ERROR!!! on 4-node PBN test ***')
+% end
 
 
 
@@ -232,7 +234,7 @@ numBs = size(M.xs, 2);
 fullTest = false;
 
 flyStartingStates = round(rand(1,length(logicTables)));
-flySim = simTransitionMatrix(logicTables, flyStartingStates, zeros(1,length(logicTables)), 30);
+flySim = simBoolModel(logicTables, flyStartingStates, zeros(1,length(logicTables)), 30);
 if (sum(diff(flySim(end-1:end, :), 1, 1) ~= 0) ~= 0)
     error('** oops -- no convergence on fly test')
 end
@@ -249,10 +251,10 @@ end
 % iteratively refine our equations
 
 if fullTest
-    [ M, tStart, stats, dbgIndices ] = buildF(M, 2000, 0, .01, false, allBinaries);
+    [ M, tStart, stats, dbgIndices ] = buildF(M, 2000, 0, false, .01, allBinaries);
     allBinaries = allBinaries(:, dbgIndices);
 else
-    [ M, tStart, stats ] = buildF(M, 2000, 0, .01, false);       % stats = # new vars, # new constraints, total # variables, total # constraints
+    [ M, tStart, stats ] = buildF(M, 2000, 0, false, .01);       % stats = # new vars, # new constraints, total # variables, total # constraints
 end
 
     % check M.fs and M.cs to make sure that they are consistent with

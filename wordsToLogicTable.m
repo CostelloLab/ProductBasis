@@ -8,9 +8,9 @@ function [ usedVars, logicTable ] = wordsToLogicTable(varNames, transitionRule, 
     % respective columns in the inputTable (defined below);
     % also change 'and' to '&', etc.
 
-subs = { '&', '|', '~','&', '|', '~' };
+subs = { '', '&', '|', '~', '', '&', '|', '~' };
 numSubs = length(subs);
-varNames(end+1:end+numSubs) = { 'and', 'or', 'not', 'AND', 'OR', 'NOT' };
+varNames(end+1:end+numSubs) = { 'either','and', 'or', 'not', 'EITHER', 'AND', 'OR', 'NOT' };
 
 varLengths = zeros(1, length(varNames));
 for loopVar = 1:length(varNames)
@@ -29,11 +29,11 @@ for loopVar = varsInOrder
     
     firstLetters = transitionRule(textBeginnings(2:end));
     idx = ((firstLetters == ' ') | (firstLetters == ')'));
-    if sum(~idx) > 0
-    end
     textEndpoints = textEndpoints([ idx true ]);
     textBeginnings = textBeginnings([ true idx ]);
     
+    if loopVar == 119
+    end
     if length(textEndpoints) > 1
         if loopVar <= length(varNames)-numSubs
             numUsedVars = numUsedVars + 1;
@@ -51,6 +51,8 @@ for loopVar = varsInOrder
     end
 end
 
+    
+    
 
     % construct a table containing all possible inputs
 
@@ -69,7 +71,7 @@ end
     % evaluate the rule as a MATLAB expression
 
 try
-    logicTable = eval(transitionRule);
+    logicTable = double(eval(transitionRule));
 catch
     error('wordsToLogicTable():  problem with inputs')
 end

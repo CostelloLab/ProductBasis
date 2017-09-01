@@ -4,14 +4,15 @@
 % denoted 'f'.
 
 function [ M, simStartTime, stats ] = ...
-    buildF(M, maxVars, maxFinalVars, eigThreshold, isContinuous)
+    buildF(M, maxVars, maxFinalVars, isContinuous, eigThreshold, allowFactorization)
 
 
     % our initial features are just the fundamental Boolean state variables
 
 backspaceString = '';
-simStartTime = 1;
 finished = false;
+realTol = 1.e-6;
+maxAllowedCoef = realTol*flintmax();
 
 numBs = size(M.xs, 2);
 stats = zeros(0, 4);
@@ -32,8 +33,31 @@ if ~exist('isContinuous', 'var')
     isContinuous = false;
 end
 
+if ~exist('allowFactorization', 'var')
+    allowFactorization = true;
+end
+
 xsToKeep = true(1, size(M.xs, 1));
-isQueryVar = xsToKeep;
+
+isPBN = false;
+oversizeCoefThreshold = 1;
+for loopB = 1:numBs
+    if sum(M.baseFs{loopB}{1} ~= round(M.baseFs{loopB}{1} )) > 0
+        isPBN = true;
+        allowFactorization = false;
+        oversizeCoefThreshold = 1 / eigThreshold;
+        break;
+    end
+end
+
+
+    % don't allow equation-reduction for PBNs or continuous-time networks
+    % (it doesn't really work..)
+    
+% if isPBN || isContinuous
+%     maxFinalVars = maxVars;
+% end
+
 
     % first iteration:  find evolution equations for the fundamental variables
     % 
@@ -52,127 +76,161 @@ while diff(size(M.fs)) ~= 0 || size(M.xs, 1) > maxFinalVars
     removeMoreEigs = true;
     while size(M.fs, 1) > maxFinalVars && removeMoreEigs
         
-        printProgress('finding dependencies..');
+        printProgress('finding decaying modes..');
         
-        idx = find(M.ts < simStartTime);
-        for loopFindRedundancies = 1:2
-            littleF = M.fs(idx, :);
-            little = max(1.e-6, max(size(littleF)) * eps(norm(littleF)) );
-            
-            squareF = M.fs(idx, idx);
-            [ eigenVecs, eigenVals ] = eig(squareF' + 1.e-12*eye(size(squareF)), 'nobalance');
-            eigenVals = diag(eigenVals)';
-            
-            littleTs = repmat(M.ts(idx), 1, length(idx));
-            littleTs(abs(eigenVecs) < little) = 0;
-            if loopFindRedundancies == 1
-                deltaTs = simStartTime - max(littleTs, [], 1);
-                eigenVals = eigenVals(abs(eigenVals).^deltaTs < eigThreshold);
-            else
-                eigenVals = eigenVals(abs(eigenVals) < 1 - 1e-6);
-            end
+        little = max(size(M.fs)) * eps(norm(M.fs)) + norm(M.ferr);
+        
+        if isPBN
+            squareF = M.fs(:, 1:size(M.fs, 1));
+            [ eigenVecs, eigenValsMat, eigenErrs ] = condeig(squareF');
+            eigenVals = diag(eigenValsMat)';
+            eigenErrs = eigenErrs*norm(M.ferr(:, 1:size(M.fs, 1)) + eps(squareF));
             
             [ ~, eigenIdx ] = sort(abs(eigenVals));
             eigenVals = eigenVals(eigenIdx);
+            eigenVecs = eigenVecs(:, eigenIdx);
+            eigenErrs = eigenErrs(eigenIdx);
+            eigenVecErr = eigenVecs'*M.fs(:, size(M.fs, 1)+1:end);
             
+            eigenGroups = [ 1 find(abs(diff(eigenVals, 1, 2)) > little)+1 length(eigenVals)+1 ];
+            removableGroups = ((diff(eigenGroups) == 1) & (sqrt(mean(eigenVecErr(eigenGroups(1:end-1), :).^2, 2)) > little)');
+            eigenVals(eigenGroups(removableGroups)) = [];
+            eigenVecs(:, eigenGroups(removableGroups)) = [];
+            eigenErrs(eigenGroups(removableGroups)) = [];
+            
+            eigenVecs = eigenVecs(:, abs(eigenVals) < 1 - little);
+            eigenErrs = eigenErrs(abs(eigenVals) < 1 - little);
+            eigenVals = eigenVals(abs(eigenVals) < 1 - little);
             eigenGroups = [ 1 find(abs(diff(eigenVals)) > little)+1 length(eigenVals)+1 ];
-            isIndependent = true(1, length(idx));
+        else
+            eigenVals = 0;
+            eigenErrs = 0;
+            eigenGroups = [ 1 2 ];
+        end
+        
+        isIndependent = true(1, size(M.fs, 1));
+        numDependentVars = 0;
+        if ~isempty(eigenVals)
             for loopEig = 1:length(eigenGroups)-1
                 sortedIndices = eigenGroups(loopEig):eigenGroups(loopEig+1)-1;
                 oneEig = mean(eigenVals(sortedIndices));
+                eigErr = max(eigenErrs(sortedIndices));
+%                 if isPBN
+%                     try
+%                         [ polishedEigs, ~, polishedEigErrs ] = polishEigs(squareF', oneEig, zeros(0, length(sortedIndices)));
+%                         oneEig = abs(mean(diag(polishedEigs)));
+%                         eigErr = sum(diag(polishedEigErrs));
+%                     catch
+%                         eigErr = Inf;
+%                     end
+%                 end
                 
-                adjustedF = littleF - oneEig*eye(size(littleF));
-                
+                adjustedF = M.fs - oneEig*eye(size(M.fs));
+
                 [~, r, e] = qr(adjustedF', 'vector');
                 rSquareIdx = 1:min(size(r));
                 diagR = [ diag(r(rSquareIdx, rSquareIdx))' zeros(1, max(0, diff(size(r)))) ];
-                
+
                 isIndependent(e(abs(diagR) <= little)) = false;
-                if sum(~isIndependent) > 0
+                numDependentVars = sum(~isIndependent);
+                if numDependentVars > 0
                     break
                 end
             end
             removeMoreEigs = (loopEig < length(eigenGroups)-1);
-            
-            independentVars = sort(idx(isIndependent));
-            dependentVars = sort(idx(~isIndependent));
-            if ~isempty(dependentVars)
-                break
-            end
-            
-            if loopFindRedundancies == 1
-                idx = 1:length(M.ts);
-            end
+        else
+            removeMoreEigs = false;
         end
         
-        toSolve = M.fs - oneEig*eye(size(M.fs));
-        
-        allCoefs = zeros(length(dependentVars), size(M.fs, 1));
-        allCoefs(:, dependentVars) = -eye(length(dependentVars));
-        if ~isempty(dependentVars)
-            allCoefs(:, independentVars) = ((toSolve(independentVars, :)') \ (toSolve(dependentVars, :)' ))';
-        end
-if ~isempty(allCoefs)
-    %disp(oneEig)
-    if imag(oneEig) ~= 0
-    end
-end
-        
-        areComplex = (sum(imag(allCoefs) ~= 0, 2) > 0);
-        allCoefs = [ allCoefs(~areComplex, :); real(allCoefs(areComplex, :)); imag(allCoefs(areComplex, :)) ];
-        
-        if loopFindRedundancies == 2 && ~isempty(dependentVars)
-            eigenVecTimes = ones(length(dependentVars)+sum(areComplex), 1) * (M.ts(idx)');
-            eigenVecTimes(abs(allCoefs) < 1.e-6) = 0;
-            minStartTime = max(eigenVecTimes, [], 2) + max(1, ceil(log(eigThreshold)/log(abs(max(oneEig, 1.e-16)))));
-            allCoefsToKeep = (minStartTime == min(minStartTime)) | (minStartTime <= simStartTime);
+        addedAConstraint = false;
+        if numDependentVars > 0
+            
+            toSolve = M.fs - oneEig*eye(size(M.fs));
+            toSolveErr = M.ferr + eigErr*eye(size(M.ferr));
+            
+            
+                % Calculate the coefficients of the dependency polynomials by
+                % matrix division (dependent / independent variables).
+            
+            allCoefs = zeros(numDependentVars, size(M.fs, 1));
+            allCoefErrs = allCoefs;
+            allCoefErrs2 = allCoefs;
+            
+            allCoefs(:, ~isIndependent) = -eye(numDependentVars);
+            allCoefs(:, isIndependent) = toSolve(~isIndependent, :) / toSolve(isIndependent, :);
+            
+%             minSV = min(svd(toSolve(isIndependent, :)));
+%             allCoefErrs(:, isIndependent) = repmat( ...
+%                 rowVecNorm(toSolve(~isIndependent, :)) * norm(toSolveErr(isIndependent, :) + eps(toSolve(isIndependent, :))) / minSV^2 ...
+%                     + rowVecNorm(toSolveErr(~isIndependent, :) + eps(toSolve(~isIndependent, :))) / minSV, ...
+%                 1, sum(isIndependent) );
+%             indepInv = eye(size(M.fs, 2)) / toSolve(isIndependent, :);
+%             allCoefErrs2(:, isIndependent) = toSolveErr(~isIndependent, :) * abs(indepInv) ...
+%                 + abs( abs(allCoefs(:, isIndependent))*toSolveErr(isIndependent, :) / abs(toSolve(isIndependent, :)) );
+%             allCoefErrs = allCoefErrs2;
+            independentSVs = svd(toSolve(isIndependent, :));
+            if isempty(independentSVs)
+                minSV = 1;
+                maxSV = 1;
+            else
+                minSV = min(independentSVs);
+                maxSV = max(independentSVs);
+            end
+            allCoefErrs = repmat( sqrt(sum((eps(toSolve(~isIndependent, :))).^2, 2))*maxSV/minSV, 1, size(M.fs, 1)) ...
+                + norm(toSolveErr(~isIndependent, :))*minSV ...
+                + norm(toSolve(isIndependent, :))*norm(toSolveErr(~isIndependent, :))*minSV/maxSV;
+            
+            areComplex = (sum(abs(imag(allCoefs)) > allCoefErrs, 2) > 0);
+            allCoefs = [ allCoefs(~areComplex, :); real(allCoefs(areComplex, :)); imag(allCoefs(areComplex, :)) ];
+            allCoefErrs = [ allCoefErrs(~areComplex, :); allCoefErrs(areComplex, :); allCoefErrs(areComplex, :) ];
+            
+            eigenVecTimes = ones(numDependentVars+sum(areComplex), 1) * (M.ts');
+            eigenVecTimes(abs(allCoefs) <= allCoefErrs) = 0;
+            constraintTimeConst = log(max(abs(oneEig), 1.e-16));
+            minStartTime = max(max(eigenVecTimes, [], 2), 1) + log(eigThreshold)/constraintTimeConst;
+            allCoefsToKeep = (minStartTime == min(minStartTime)) | (minStartTime <= max([ M.ts; M.cts ]));
             allCoefs = allCoefs(allCoefsToKeep, :);
-            if max(minStartTime(allCoefsToKeep)) > simStartTime
-                simStartTime = max(minStartTime(allCoefsToKeep));
-            end
-        end
-        
-        
-            % postpone constraints that are going to take us forever --
-            % maybe they'll get simpler next round
-        
-        cSizes = sum(abs(allCoefs) > 1.e-6, 2);
-        [ cSizes, idx ] = sort(cSizes);
-        allCoefs = allCoefs(idx, :);
-        
-        if ~isempty(cSizes)
-            allCoefs = allCoefs(cSizes <= 10*cSizes(1), :);
-        end
-        
-        
-            % add the constraints here
-        
-        printProgress('solving constraints');
-        xsToKeep = true(1, size(M.fs, 2));
-        
-        startingVarTs = M.ts;       % use the original 'ts' so that constraint #1 doesn't update ts(1) and prevent constraint #2 from working 
-        for loopDependency = 1:size(allCoefs, 1)
-            printProgress([ num2str(loopDependency) ' / ' num2str(size(allCoefs, 1)) ' new constraints']);
+            allCoefErrs = allCoefErrs(allCoefsToKeep, :);
+            minStartTime = minStartTime(allCoefsToKeep);
             
-            nonzeroCoefs = find(abs(allCoefs(loopDependency, :)) > 1.e-2);
-            maxVarTs = max(startingVarTs(nonzeroCoefs));
-            if maxVarTs < simStartTime
-dbgWhichXs = ~M.xs(nonzeroCoefs, 3);
-dbg12 = allCoefs(loopDependency, nonzeroCoefs)';
-if abs(sum(dbg12(dbgWhichXs))) > 1.e-3
-end
-                addConstraints({ allCoefs(loopDependency, nonzeroCoefs)', M.xs(nonzeroCoefs, :) }, maxVarTs+1);
-dbgWhichXs = ~M.xs(:, 3);
-if ~isempty(M.fs)
-if sum(sum(abs(M.fs*dbgWhichXs - dbgWhichXs(1:size(M.fs, 1))) > 1.e-2)) > 0
-end
-end
+            
+                % postpone constraints that are going to take us forever --
+                % maybe they'll get simpler next round
+            
+            cSizes = sum(abs(allCoefs) > allCoefErrs, 2);
+            [ cSizes, idx ] = sort(cSizes);
+            allCoefs = allCoefs(idx, :);
+            allCoefErrs = allCoefErrs(idx, :);
+            
+            if ~isempty(cSizes)
+                minStartTime = minStartTime(idx);
+                allCoefs = allCoefs(cSizes <= 2*cSizes(1), :);
+                allCoefErrs = allCoefErrs(cSizes <= 2*cSizes(1), :);
             end
+            
+            
+                % add the constraints here
+            
+            printProgress('solving constraints');
+            
+            for loopDependency = 1:size(allCoefs, 1)
+                printProgress([ num2str(loopDependency) ' / ' num2str(size(allCoefs, 1)) ' new constraints']);
+                
+                nonzeroCoefs = find(abs(allCoefs(loopDependency, :)) > allCoefErrs(loopDependency, :));
+                addConstraints({ allCoefs(loopDependency, nonzeroCoefs)', ...
+                        allCoefErrs(loopDependency, nonzeroCoefs)', M.xs(nonzeroCoefs, :) }, minStartTime(loopDependency), constraintTimeConst);
+            end
+            
+            stats(end, 2) = stats(end, 2) + size(allCoefs, 1);
         end
-        
-        stats(end, 2) = stats(end, 2) + size(allCoefs, 1);
         
         M.fs(:, size(M.fs, 2)+1:size(M.xs, 1)) = 0;
+        M.ferr(:, size(M.ferr, 2)+1:size(M.xs, 1)) = 0;
+        
+        if removeMoreEigs && ~addedConstraint
+            printProgress(sprintf('\b'));
+            error('buildF:stuck', 'buildF:  got stuck')
+        end
         
         
             % put the easiest constraints at the beginning
@@ -187,25 +245,11 @@ end
         M.cs = M.cs(:, idx);
         M.cts = M.cts(idx, :);
         
-        
-            % remove unused variables
-        
-        varsToDiscard = find(~xsToKeep);
-        if (diff(size(M.fs)) == 0) && isempty(varsToDiscard)
+        if (diff(size(M.fs)) == 0) && sum(~xsToKeep) == 0
             finished = true;
             break
         end
-        
-        while ~isempty(varsToDiscard)
-            fsToDiscard = varsToDiscard(varsToDiscard <= size(M.fs, 1));
-            M.xs(varsToDiscard, :) = [];
-            M.fs(fsToDiscard, :) = [];
-            M.fs(:, varsToDiscard) = [];
-            M.ts(fsToDiscard, :) = [];
-            xsToKeep(:, varsToDiscard) = [];
-            isQueryVar(:, varsToDiscard) = [];
-            varsToDiscard = find(sum(abs(M.fs) > 1.e-6, 1) == 0 & ~isQueryVar);
-        end
+        removeUnusedVars()
     end
     
     stats(end, 3) = size(M.xs, 1);
@@ -221,7 +265,7 @@ end
         % constraints)
     
     numFs = size(M.fs, 1);
-    if numFs > maxFinalVars && diff(size(M.fs)) ~= 0
+    if numFs > maxFinalVars && diff(size(M.fs)) ~= 0 && allowFactorization
         maxFactorIndices = min(sum(M.xs(numFs+1:end, :), 2));
         for numFactorIndices = 2:maxFactorIndices
             factorXs = false(0, numBs);
@@ -244,6 +288,7 @@ end
         end
         
         M.fs = [ M.fs  zeros(numFs, size(M.xs, 1)-size(M.fs, 2)) ];
+        M.ferr = [ M.ferr  zeros(numFs, size(M.xs, 1)-size(M.ferr, 2)) ];
         
         numXIndices = sum(M.xs, 2)';
         numXIndices(1:numFs) = -1;
@@ -251,6 +296,7 @@ end
         
         M.xs = M.xs(newXsOrder, :);             %reorder the xs
         M.fs = M.fs(:, newXsOrder);
+        M.ferr = M.ferr(:, newXsOrder);
         
         numFsToAdd = sum( sum(M.xs(size(M.fs, 1)+1:end, :), 2) == maxFactorIndices );
     else
@@ -258,7 +304,6 @@ end
     end
     
     xsToKeep(end+1:size(M.xs, 1)) = true;
-    isQueryVar(end+1:size(M.xs, 1)) = false;
     
     
         % loop over each new variable we need to add an evolution equation
@@ -267,10 +312,11 @@ end
     if diff(size(M.fs)) ~= 0 && size(M.fs, 1) == maxVars
         disp('stats:')
         disp(stats)
-        error('variable limit reached')
+        error('buildF:varLimit', 'variable limit reached')
     end
     
     newFs = zeros(numFsToAdd, size(M.xs, 1));
+    newFerr = newFs;
     newTs = ones(numFsToAdd, 1);
     
     for loopX = 1:numFsToAdd
@@ -283,21 +329,21 @@ end
         
         newX = M.xs(size(M.fs, 1)+loopX, :);
         if ~isContinuous
-            xfPoly = { 1, false(1, numBs) };
+            xfPoly = { 1, 0, false(1, numBs) };
             for loopBaseF = find(newX)
                 xfPoly = multiplyPoly(xfPoly, M.baseFs{loopBaseF});
             end
         else
-            xfPoly = { zeros(0, 1), false(0, numBs) };
+            xfPoly = { zeros(0, 1), zeros(0, 1), false(0, numBs) };
             for loopBaseF = find(newX)
-                otherVars = { 1, newX };
-                otherVars{2}(loopBaseF) = false;
+                otherVars = { 1, 0, newX };
+                otherVars{3}(loopBaseF) = false;
                 xfPoly = addPoly(xfPoly, multiplyPoly(otherVars, M.baseFs{loopBaseF}));
             end
         end
         
         if ~isempty(M.cs)
-            [ xfPolyConstrained, polyStartTime ] = constrainPoly(xfPoly, 1);
+            [ xfPolyConstrained, polyStartTime ] = constrainPoly(xfPoly, 1, false);
         else
             xfPolyConstrained = xfPoly;
             polyStartTime = 1;
@@ -305,15 +351,38 @@ end
         
         theVars = findVars(xfPolyConstrained);
         newFs(loopX, theVars) = xfPolyConstrained{1};
+        newFerr(loopX, theVars) = xfPolyConstrained{2};
         newTs(loopX) = polyStartTime;
     end
     stats(end, 1) = numFsToAdd;
     
     M.fs = [ M.fs  zeros(size(M.fs, 1), size(M.xs, 1)-size(M.fs, 2)); newFs ];
+    M.ferr = [ M.ferr  zeros(size(M.ferr, 1), size(M.xs, 1)-size(M.ferr, 2)); newFerr ];
     M.ts = [ M.ts; newTs ];
+    
+    removeUnusedVars();         % these can be caused by constrainPoly()
 end
 
+simStartTime = max([ M.ts; M.cts ]);
 printProgress(sprintf('\b'));
+
+
+
+        % remove variables marked in xsToKeep for discarding
+    
+    function removeUnusedVars()
+        
+        varsToDiscard = find(~xsToKeep);
+        fsToDiscard = varsToDiscard(varsToDiscard <= size(M.fs, 1));
+        
+        M.xs(varsToDiscard, :) = [];
+        M.fs(fsToDiscard, :) = [];
+        M.fs(:, varsToDiscard) = [];
+        M.ferr(fsToDiscard, :) = [];
+        M.ferr(:, varsToDiscard) = [];
+        M.ts(fsToDiscard, :) = [];
+        xsToKeep(:, varsToDiscard) = [];
+    end
 
 
 
@@ -321,75 +390,116 @@ printProgress(sprintf('\b'));
         % and calls itself recursively to enforce the further constraints
         % that any variable times the first constraint must give 0 or 1.
     
-    function addConstraints(polyToConstrain, constraintStartTime)
+    function addConstraints(polyToConstrain, modeEvaporationTime, constraintTimeConstant)
         
-        for loopConstraintVar = 1:size(polyToConstrain{1}, 1)
-            
-            idxs = ((1:size(polyToConstrain{1}, 1)) ~= loopConstraintVar);
-            constraintPoly = constrainPoly( {    -polyToConstrain{1}(idxs, :) / polyToConstrain{1}(loopConstraintVar, :), ...
-                                polyToConstrain{2}(idxs, :) | repmat(polyToConstrain{2}(loopConstraintVar, :), sum(idxs), 1) }, 1 );
-            constraintPolyCompare = constrainPoly({ 1, polyToConstrain{2}(loopConstraintVar, :) }, 1);
-            
-            if ~(polysAreEqual(constraintPoly, { [ 1 1 ], polyToConstrain{2}(loopConstraintVar, :) }) ...
-                    || polysAreEqual(constraintPoly, constraintPolyCompare))
+        if length(polyToConstrain{1}) > 1
+            scaledPoly = polyToConstrain;
+            scaledPoly{1} = scaledPoly{1}/min(abs(polyToConstrain{1}));
+            [ ~, constraintWasAdded ] = checkOversizeConstraints(scaledPoly, true, false, true);
+            if constraintWasAdded
+                return
+            end
+        end
+        
+        polyToConstrain = constrainPoly(polyToConstrain, ceil(modeEvaporationTime), true);
+        if ~allowFactorization && ~isempty(polyToConstrain{1})
+            [ ~, varOrder ] = sortrows(polyToConstrain{3});
+            termsToConsider = varOrder(1);
+        else
+            termsToConsider = 1:size(polyToConstrain{1}, 1);
+        end
+        
+        for loopConstraintVar = termsToConsider
+            if sum(sum(polyToConstrain{3}(:, ~polyToConstrain{3}(loopConstraintVar, :)), 2) == 0) == 1
                 
-                
-                    % get rid of any pre-existing constraints that are now
-                    % redundant
-                
-                factoredConstraints = find(sum(~M.cxs(:, polyToConstrain{2}(loopConstraintVar, :)), 2)' == 0);
-                toDelete = false(1, length(factoredConstraints));
-                for factorCounter = 1:length(factoredConstraints)
-                    loopFactoredConstraint = factoredConstraints(factorCounter);
-                    constraintCompare = multiplyPoly({ 1, M.cxs(loopFactoredConstraint, :) }, constraintPoly);
-                    if size(constraintCompare{1}, 1) == size(M.cs{loopFactoredConstraint}{1}, 1)
-                        if sum(abs(constraintCompare{1} - M.cs{loopFactoredConstraint}{1}) > 1.e-6) == 0 ...
-                                    && sum(sum(constraintCompare{2} ~= M.cs{loopFactoredConstraint}{2})) == 0
-                            toDelete(factorCounter) = true;
-                        end
-                    end
-                end
-                M.cxs(factoredConstraints(toDelete), :) = [];
-                M.cs(factoredConstraints(toDelete)) = [];
-                M.cts(factoredConstraints(toDelete), :) = [];
-                
-                
-                    % actually add the new constraint here
-                
-                priorInstance = find(sum(M.cxs ~= repmat(polyToConstrain{2}(loopConstraintVar, :), size(M.cxs, 1), 1), 2) == 0, 1);
-                if isempty(priorInstance)
-                    M.cxs(end+1, :) = polyToConstrain{2}(loopConstraintVar, :);
-                    M.cs{end+1} = constraintPoly;
-                    M.cts(end+1, :) = constraintStartTime;
+                idxs = ((1:size(polyToConstrain{1}, 1)) ~= loopConstraintVar);
+                if ~allowFactorization
+                    newPolyIndices = polyToConstrain{3}(idxs, :);
                 else
-                    M.cs{priorInstance} = multiplyPoly(M.cs{priorInstance}, constraintPoly);
-                    M.cts(priorInstance) = constraintStartTime;
+                    newPolyIndices = polyToConstrain{3}(idxs, :) | repmat(polyToConstrain{3}(loopConstraintVar, :), sum(idxs), 1);
                 end
+                constraintPoly = constrainPoly( {    -polyToConstrain{1}(idxs, :) / polyToConstrain{1}(loopConstraintVar, :), ...
+                                    polyToConstrain{2}(idxs, :) / abs(polyToConstrain{1}(loopConstraintVar, :)) + ...
+                                        abs(polyToConstrain{1}(idxs, :)) * polyToConstrain{2}(loopConstraintVar, :) ...
+                                                    / polyToConstrain{1}(loopConstraintVar, :).^2, ...
+                                    newPolyIndices }, 1, true );
+                constraintPolyCompare = constrainPoly({ 1, 0, polyToConstrain{3}(loopConstraintVar, :) }, 1, true);
+                
+                if ~(polysAreEqual(constraintPoly, { [ 1 1 ], [ 0 0 ], polyToConstrain{3}(loopConstraintVar, :) }) ...
+                        || polysAreEqual(constraintPoly, constraintPolyCompare))
                 
                 
-                    % Find and re-constrain all xs factored by the new constraint,
-                    % adding any new variables that appear.  For example,
-                    % if our constraint is that x_{12} = x_3 + x_4, then
-                    % multiply x_{123} by x_3 + x_4 and by x_{12} - x_4.
-                
-                factoredVars = find(sum(~M.xs(:, polyToConstrain{2}(loopConstraintVar, :)), 2)' == 0 & xsToKeep);
-                for loopFactoredVar = factoredVars
-                    if sum(sum(constraintPoly{2} & ~repmat(M.xs(loopFactoredVar, :), size(constraintPoly{2}, 1), 1), 2) == 0) == 0
-                        newPoly = constrainPoly({ 1, M.xs(loopFactoredVar, :) }, constraintStartTime);
-                        newPolyXs = findVars(newPoly);
-                        xsToKeep(loopFactoredVar) = false;
-                        isQueryVar(newPolyXs) = true;
-                        
-                        try     % in case the new fs are being built and M.fs is not updated with zeros yet
-                            changedFs = (abs(M.fs(:, loopFactoredVar)) > 1.e-6);
-                            M.ts(changedFs) = max(M.ts(changedFs), constraintStartTime);
-                            toAdd = M.fs(:, loopFactoredVar)*(newPoly{1}(:, 1)');
-                            M.fs(:, loopFactoredVar) = 0;
+                        % Get rid of any pre-existing constraints that are
+                        % now redundant (for deterministic networks only;
+                        % for PBNs old constraints can be useful if they
+                        % involve fewer indices than the new one, because
+                        % they're not allowed to multiply same indices)
+                    
+                    if allowFactorization
+                        factoredConstraints = find(sum(~M.cxs(:, polyToConstrain{3}(loopConstraintVar, :)), 2)' == 0);
+                        toDelete = false(1, length(factoredConstraints));
+                        for factorCounter = 1:length(factoredConstraints)
+                            loopFactoredConstraint = factoredConstraints(factorCounter);
+                            constraintCompare = multiplyPoly({ 1, 0, M.cxs(loopFactoredConstraint, :) }, constraintPoly);
+                             if polysAreEqual(constraintCompare, M.cs{loopFactoredConstraint})
+                                toDelete(factorCounter) = true;
+                            end
                         end
-                        if max(newPolyXs) > size(M.fs, 2)
-                            M.fs(:, max(newPolyXs)) = 0;
+                        M.cxs(factoredConstraints(toDelete), :) = [];
+                        M.cs(factoredConstraints(toDelete)) = [];
+                        M.cts(factoredConstraints(toDelete), :) = [];
+                    end
+                    
+                    
+                        % actually add the new constraint here
+                    
+                    constraintStartTime = ceil(modeEvaporationTime + max(0, log(abs(polyToConstrain{1}(loopConstraintVar, :)))/constraintTimeConstant));
+                    priorInstance = find(sum(M.cxs ~= repmat(polyToConstrain{3}(loopConstraintVar, :), size(M.cxs, 1), 1), 2) == 0, 1);
+                    if isempty(priorInstance) || ~allowFactorization
+                        M.cxs(end+1, :) = polyToConstrain{3}(loopConstraintVar, :);
+                        M.cs{end+1} = constraintPoly;
+                        M.cts(end+1, :) = constraintStartTime;
+                    else
+                        constraintPoly = checkOversizeConstraints(multiplyPoly(M.cs{priorInstance}, constraintPoly), true, true, false);
+                        M.cs{priorInstance} = constraintPoly;
+                        M.cts(priorInstance) = constraintStartTime;
+                    end
+                    addedConstraint = true;
+                    
+                    
+                        % Find and re-constrain all xs factored by the new constraint,
+                        % adding any new variables that appear.  For example,
+                        % if our constraint is that x_{12} = x_3 + x_4, then
+                        % multiply x_{123} by x_3 + x_4 and by x_{12} - x_4.
+                    
+                    if ~allowFactorization
+                        factoredVars = find(sum(repmat(polyToConstrain{3}(loopConstraintVar, :), size(M.xs, 1), 1) ~= M.xs, 2)' == 0 & xsToKeep);
+                    else
+                        factoredVars = find(sum(~M.xs(:, polyToConstrain{3}(loopConstraintVar, :)), 2)' == 0 & xsToKeep);
+                    end
+                    for loopFactoredVar = factoredVars
+                        if sum(sum(constraintPoly{3} & ~repmat(M.xs(loopFactoredVar, :), size(constraintPoly{3}, 1), 1), 2) == 0) == 0
+                            [ newPoly, eqStartTime ] = constrainPoly({ 1, 0, M.xs(loopFactoredVar, :) }, constraintStartTime, true);
+                            newPolyXs = findVars(newPoly);
+                            xsToKeep(loopFactoredVar) = false;
+                            
+                            try     % in case the new fs are being built and M.fs is not updated with zeros yet
+                                changedFs = (abs(M.fs(:, loopFactoredVar)) > M.ferr(:, loopFactoredVar));
+                                M.ts(changedFs) = max(M.ts(changedFs), eqStartTime);
+                                toAdd = M.fs(:, loopFactoredVar)*(newPoly{1}(:, 1)');
+                                toAddErr = M.ferr(:, loopFactoredVar)*abs(newPoly{1}(:, 1)') + abs(M.fs(:, loopFactoredVar))*(newPoly{2}(:, 1)');
+                                M.fs(:, loopFactoredVar) = 0;
+                            catch
+                                toAdd = 0;
+                                toAddErr = 0;
+                            end
+                            if max(newPolyXs) > size(M.fs, 2)
+                                M.fs(:, max(newPolyXs)) = 0;
+                                M.ferr(:, max(newPolyXs)) = 0;
+                            end
+                            M.fs(:, newPolyXs) = M.fs(:, newPolyXs) + toAdd;
+                            M.ferr(:, newPolyXs) = M.ferr(:, newPolyXs) + toAddErr;
                         end
-                        M.fs(:, newPolyXs) = M.fs(:, newPolyXs) + toAdd;
                     end
                 end
             end
@@ -402,32 +512,48 @@ printProgress(sprintf('\b'));
         % polynomial by multiplying each term of the polynomial by its
         % 'factors'
     
-    function [ constrainedPoly, startTime ] = constrainPoly(unconstrainedTerms, initialStartTime)
+    function [ constrainedPoly, startTime ] = constrainPoly(unconstrainedTerms, initialStartTime, allowedToAddConstraints)
         startTime = initialStartTime;
-        constrainedPoly = { zeros(0, 1), false(0, numBs) };
         
         while ~isempty(unconstrainedTerms{1})
             
             madeAChange = false;
             for loopConstraint = 1:length(M.cs)
-                newTerms = { zeros(0, 1), false(0, numBs) };
+                newTerms = { zeros(0, 1), zeros(0, 1), false(0, numBs) };
                 
-                factoredTerms = find(sum(~unconstrainedTerms{2}(:, M.cxs(loopConstraint, :)), 2) == 0)';
+                if ~allowFactorization
+                    factoredTerms = find(sum(repmat(M.cxs(loopConstraint, :), length(unconstrainedTerms{1}), 1) ~= unconstrainedTerms{3}, 2)' == 0);
+                else
+                    factoredTerms = find(sum(~unconstrainedTerms{3}(:, M.cxs(loopConstraint, :)), 2) == 0)';
+                end
                 changedTerm = false(1, length(unconstrainedTerms{1}));
                 for loopFactoredTerm = factoredTerms
-                    if sum(sum(M.cs{loopConstraint}{2}(:, ~unconstrainedTerms{2}(loopFactoredTerm, :)), 2) == 0) == 0
-                        originalTerm = { unconstrainedTerms{1}(loopFactoredTerm, :), unconstrainedTerms{2}(loopFactoredTerm, :) };
-                        oneConstrainedTerm = multiplyPoly(originalTerm, M.cs{loopConstraint});
-                        changedTerm(loopFactoredTerm) = true;
-                        madeAChange = true;
-                        startTime = max([ startTime; M.cts(loopConstraint) ]);
-                        newTerms = { [ newTerms{1}; oneConstrainedTerm{1} ], ...
-                                     [ newTerms{2}; oneConstrainedTerm{2} ] };
+                    if sum(sum(M.cs{loopConstraint}{3}(:, ~unconstrainedTerms{3}(loopFactoredTerm, :)), 2) == 0) == 0
+                        originalTerm = { unconstrainedTerms{1}(loopFactoredTerm, :), ...
+                            unconstrainedTerms{2}(loopFactoredTerm, :), unconstrainedTerms{3}(loopFactoredTerm, :) };
+                        constraintIsAllowed = true;
+                        if ~allowFactorization
+                            originalTerm{3} = (originalTerm{3} & ~M.cxs(loopConstraint, :));
+                            if sum(sum(M.cs{loopConstraint}{3}(:, originalTerm{3}))) ~= 0
+                                constraintIsAllowed = false;
+                            end
+                        end
+                        
+                        if constraintIsAllowed
+                            oneConstrainedTerm = multiplyPoly(originalTerm, M.cs{loopConstraint});
+                            changedTerm(loopFactoredTerm) = true;
+                            madeAChange = true;
+                            startTime = max([ startTime; M.cts(loopConstraint) ]);
+                            newTerms = { [ newTerms{1}; oneConstrainedTerm{1} ], ...
+                                         [ newTerms{2}; oneConstrainedTerm{2} ], ...
+                                         [ newTerms{3}; oneConstrainedTerm{3} ] };
+                        end
                     end
                 end
                 
                 [ unconstrainedTerms, addedAConstraint ] = checkOversizeConstraints(reducePoly( ...
-                    { [ unconstrainedTerms{1}(~changedTerm); newTerms{1} ], [ unconstrainedTerms{2}(~changedTerm, :); newTerms{2} ] } ));
+                    { [ unconstrainedTerms{1}(~changedTerm); newTerms{1} ], [ unconstrainedTerms{2}(~changedTerm); newTerms{2} ], ...
+                    [ unconstrainedTerms{3}(~changedTerm, :); newTerms{3} ] } ), allowedToAddConstraints, true, false);
                 if addedAConstraint
                     madeAChange = true;
                     break;
@@ -442,7 +568,15 @@ printProgress(sprintf('\b'));
     end
 
 
-    function [ polyCoefs, addedAConstraint ] = checkOversizeConstraints(polyCoefs)
+    function [ polyCoefs, addedAConstraint ] = checkOversizeConstraints(polyCoefs, allowedToAddConstraints, errorOnOversize, returnOnAdd)
+        
+        polyStartingTime = max([ M.ts; M.cts ]);
+        
+        if max(abs(polyCoefs{2})) > realTol
+            printProgress(sprintf('\b'));
+            error('buildF:overTol', 'buildF:  loss of numerical precision')
+        end
+        
         addedAConstraint = false;
         lookAgain = true;
         while lookAgain
@@ -450,20 +584,34 @@ printProgress(sprintf('\b'));
             
             realCoefs = polyCoefs{1}';
             absCoefs = abs(realCoefs);
-            sortedCoefs = sort(absCoefs);
-            coefJumps = [ 0 find(abs(diff(sortedCoefs))-1 > 1.e-6) length(sortedCoefs) ] + 1;
+            [ sortedCoefs, sortidx ] = sort(absCoefs);
+            sortedErrs = polyCoefs{2}(sortidx)';
+            if ~isempty(sortedCoefs) && errorOnOversize
+                if abs(sortedCoefs(end)) > maxAllowedCoef
+                    printProgress(sprintf('\b'));
+                    error('buildF:coeftoobig', 'buildF:  coefficient too big')
+                end
+            end
+            if length(sortedCoefs) > 1
+                diffCoefs = abs(diff(sortedCoefs));
+            else
+                diffCoefs = zeros(1, 0);
+            end
+            coefJumps = [ 0 find(diffCoefs-1 > sortedErrs(1:end-1)+sortedErrs(2:end)) length(sortedCoefs) ] + 1;
             
-            for loopCoef = 1:length(coefJumps)-1
+            for loopCoef = length(coefJumps)-1:-1:1
                 meanCoef = mean(sortedCoefs(coefJumps(loopCoef):coefJumps(loopCoef+1)-1));
                 coefMultipliers = round(abs(realCoefs/meanCoef)) .* sign(realCoefs);
                 residualCoefs = (realCoefs - meanCoef*coefMultipliers)';
-                if meanCoef - sum(abs(residualCoefs)) - 1. > 1.e-2
+                if meanCoef - sum(abs(residualCoefs)) - oversizeCoefThreshold > sum(polyCoefs{2})
                     coefsToPullOut = (coefMultipliers ~= 0);
-                    addedAConstraint = true;
-                    addConstraints({ coefMultipliers(coefsToPullOut)', polyCoefs{2}(coefsToPullOut, :) }, simStartTime);
+                    if allowedToAddConstraints
+                        addedAConstraint = true;
+                        addConstraints({ coefMultipliers(coefsToPullOut)', polyCoefs{2}(coefsToPullOut), polyCoefs{3}(coefsToPullOut, :) }, polyStartingTime, -inf);
+                    end
                     polyCoefs{1}(:, 1) = residualCoefs;
                     polyCoefs = reducePoly(polyCoefs);
-                    lookAgain = ~isempty(polyCoefs{1});
+                    lookAgain = (~isempty(polyCoefs{1})) && (~returnOnAdd);
                     break;
                 end
             end
@@ -477,15 +625,14 @@ printProgress(sprintf('\b'));
     
     function xIDs = findVars(thePoly)
         
-        xIDs = zeros(size(thePoly{2}, 1), 1);
-        for loopPolyTerm = 1:size(thePoly{2}, 1);
-            oneID = find((sum(M.xs == repmat(thePoly{2}(loopPolyTerm, :), size(M.xs, 1), 1), 2) == numBs)' ...
+        xIDs = zeros(size(thePoly{3}, 1), 1);
+        for loopPolyTerm = 1:size(thePoly{3}, 1);
+            oneID = find((sum(M.xs == repmat(thePoly{3}(loopPolyTerm, :), size(M.xs, 1), 1), 2) == numBs)' ...
                         & xsToKeep, 1, 'first');
             if isempty(oneID)
                 oneID = size(M.xs, 1)+1;
-                M.xs(size(M.xs, 1)+1, :) = thePoly{2}(loopPolyTerm, :);
+                M.xs(size(M.xs, 1)+1, :) = thePoly{3}(loopPolyTerm, :);
                 xsToKeep(1, size(xsToKeep, 2)+1) = true;
-                isQueryVar(1, size(isQueryVar, 2)+1) = false;
             end
             xIDs(loopPolyTerm) = oneID;
         end
@@ -495,16 +642,20 @@ printProgress(sprintf('\b'));
     function ifEq = polysAreEqual(poly1, poly2)
         ifEq = false;
         if size(poly1{1}, 1) == size(poly2{1}, 1)
-            if sum(abs(poly1{1} - poly2{1}) > 1.e-6) == 0 ...
-                    && sum(sum(  poly1{2} ~= poly2{2}  )) == 0
+            if sum(abs(poly1{1} - poly2{1}) > (poly1{2} + poly2{2})) == 0 ...
+                    && sum(sum(  poly1{3} ~= poly2{3}  )) == 0
                 ifEq = true;
             end
         end
     end
     
+
+    function vNorm = rowVecNorm(v0)
+        vNorm = sqrt(sum(v0.^2, 2));
+    end
     
+
     function printProgress(progressString)
-        %return
         disp([backspaceString progressString])
         backspaceString = sprintf(repmat('\b', 1, length(progressString)+1));
     end
